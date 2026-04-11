@@ -1,0 +1,11 @@
+pandas
+numpy
+scipy
+matplotlib
+seaborn
+prophet
+statsmodels
+pmdarima
+arch
+scikit-learn
+optuna
