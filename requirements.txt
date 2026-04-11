@@ -9,3 +9,4 @@ pmdarima
 arch
 scikit-learn
 optuna
+openpyxl
