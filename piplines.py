@@ -1,10 +1,11 @@
-import pandas as pd
 import numpy as np 
 import seaborn as sns
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # арима 
 import pmdarima as pm
+import statsmodels.api as sm
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.forecasting.stl import STLForecast
 from statsmodels.tsa.seasonal import STL
@@ -48,9 +49,9 @@ def acf_chacf(sr):
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     
     # ACF
-    plot_acf(sr, lags=20, ax=axes[0])
+    plot_acf(sr, lags=20, ax=axes[0], zero=False)
     # PACF
-    plot_pacf(sr, lags=20, ax=axes[1], method='ywm')
+    plot_pacf(sr, lags=20, ax=axes[1], method='ywm', zero=False)
     
     plt.show()
 # acf_chacf(df['Средняя цена'].dropna())
@@ -207,21 +208,227 @@ class InteractionTransformer(BaseEstimator, TransformerMixin):
                 feature_names.append(f"{lag_col}_X_{cross_var}")
         return np.array(feature_names)
 
+def auto_correlation_test(res, seasonal_preiod, alpha = 0.05):
+    max_lag = len(res)
 
-def auto_arima_fit(y, seasonal_preiod):
-    ## подбор оптимальной аримы 
+    for i in range(1, 2*seasonal_preiod+1, 5):
+        if sm.stats.acorr_ljungbox(res.resid, lags=[5], return_df=True)[1]>alpha:
+            return True
+    return False
+        
+
+def auto_arima_fit(y, seasonal_periods, n_trials=30):
+
+    res = STL(y, period=seasonal_periods, robust=True).fit()
+    
+    y_deseason = y - res.seasonal
+
+    def objective(trial):
+        p = trial.suggest_int('p', 0, 6)
+        q = trial.suggest_int('q', 0, 6)
+        trend = trial.suggest_categorical('trend', ['n', 'c', 't', 'ct'])
+        
+        try:
+            model = ARIMA(y_deseason, order=(p, 0, q), trend=trend).fit()
+
+            res = y - model.fittedvalues
+            if auto_correlation_test(res, seasonal_period):
+                return 1e10
+            return model.aic
+        except:
+            return 1e10
+
+    study = optuna.create_study(direction='minimize')
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(objective, n_trials=n_trials)
+
+    best_params = study.best_params
+    best_order = (best_params['p'], 0, best_params['q'])
+    best_trend = best_params['trend']
+
+    print("Best params:", best_order, "trend:", best_trend)
+
+    return best_order, best_trend
 
     
+def fit_exp_sm(y, seasonal_periods):
+    def objective(trial):
+        trend = trial.suggest_categorical('trend', ['add', 'mul', 'additive', 'multiplicative', None])
+        seasonal = trial.suggest_categorical('seasonal', ['add', 'mul', 'additive', 'multiplicative', None])
     
-    res = STL(y, period=seasonal_preiod).fit()
-    # 2. Ищем лучшие параметры p, d, q для этого ряда
-    auto_model = pm.auto_arima(res.resid + res.trend, 
-                              seasonal=False, 
-                              stationary=False, 
-                              stepwise=True, 
-                              suppress_warnings=True)
+        if trend is not None:
+            damped = trial.suggest_categorical('damped', [True, False])
+        else:
+            damped = False
+        
+        model = ExponentialSmoothing(endog = y,
+                                     trend = trend,
+                                     damped_trend = damped,
+                                     seasonal = seasonal, 
+                                     seasonal_periods = seasonal_periods).fit()
     
-    return tuple(auto_model.order)  
+        # рассчитываем метрики оценки 
+        res_exp = model.fittedvalues
+    
+        mape = calculate_metrics(y,res_exp)['MAPE']
+        return mape
+    return objective
+
+def plot_forecast_results(pred_stat, y_train, y_test, value_name = None):
+    sns.set_style("whitegrid")
+    plt.figure(figsize=(15, 8))
+    
+    # 1. Отрисовка исторических данных
+    plt.plot(y_train.ds, y_train['y'], label='Train (История)', color='black', linewidth=2, alpha=0.3)
+    
+    # 2. Отрисовка реального теста (если есть)
+    if y_test is not None:
+        plt.plot(y_test.ds, y_test['y'], label='Test (Реальность)', color='black', linewidth=3, marker='o', markersize=4)
+
+    # 3. Отрисовка прогнозов каждой модели из словаря
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'] # Красивая палитра
+    
+    for (model_name, data), color in zip(pred_stat.items(), colors):
+        test_pred = data['test_pred']
+        
+        # Если это ансамбль (массив), создаем индекс для него
+        if isinstance(test_pred, np.ndarray):
+            test_index = pd.date_range(start=y_train.index[-1], periods=len(test_pred)+1, freq=y_train.index.freq)[1:]
+        else:
+            test_index = test_pred.index
+            
+        plt.plot(test_index, test_pred, label=f'Прогноз: {model_name}', linestyle='--', color=color, linewidth=2)
+
+    plt.title(f'Сравнение моделей прогнозирования {value_name}', fontsize=16)
+    plt.xlabel('Дата', fontsize=12)
+    plt.ylabel('Объем (ед./кв.м.)', fontsize=12)
+    plt.legend(loc='upper left', frameon=True)
+    plt.tight_layout()
+    plt.show()
+
+
+def multi_model_forecast(y, forecast_len, test_size = None, seasonal_preiod = None, freq = 'MS', graph  = True, value_name = None):
+
+    """
+    Функция для прогнозирования на основе нескольких "простых" моделей
+    """
+    pred_stat = {}
+                       
+    y.columns = ['ds', 'y']
+    y.index.freq = freq
+
+    split_index = int(len(y)*test_size)
+    
+    if test_size:
+        y_train, y_test = y.iloc[:-split_index, :], y.iloc[-split_index:, :]
+    else:
+        y_train = y
+        y_test = None
+
+
+    #предварительные тесты
+    print(stationarity_check(y_train['y'], ADF = True, KPSS = True, PP = True)) #тест на стационарность
+    
+
+    # визаульное представление ряда динамики
+    plot_dynamic(x = y['ds'], y = y['y'])
+    acf_chacf(y['y'])
+    #обучение
+    
+    #фит пророка 
+    m = Prophet()
+    m.fit(y_train)
+    
+    future = m.make_future_dataframe(periods=forecast_len, freq = freq)
+    real_future = future[-forecast_len:]
+    forecast_p = m.predict(future)
+
+    p_train = forecast_p.iloc[:len(y_train)]['yhat'].values
+    p_test = forecast_p.iloc[len(y_train):len(y_train)+forecast_len]['yhat'].values
+
+    pred_stat['prop'] = { 'model': m
+                         ,'train_pred': pd.Series(p_train, index=y_train.ds)
+                         ,'test_pred': pd.Series(p_test, index = real_future.ds)
+                         ,'metrics': calculate_metrics(y_train['y'], p_train)}
+
+    #фит аримы
+    best_order, best_trend = auto_arima_fit(y_train['y'], seasonal_preiod)
+    stlf = STLForecast(y_train['y'], ARIMA, model_kwargs=dict(order=best_order, trend=best_trend), period=seasonal_preiod, robust=True)
+    stlf_res = stlf.fit()
+    
+    train_preds = stlf_res.get_prediction(start=y_train.index[0], end=y_train.index[-1]).predicted_mean
+    
+    pred_stat['ar'] = { 'model': stlf_res
+                       ,'train_pred': pd.Series(train_preds.values, index=y_train.ds)
+                       ,'test_pred':pd.Series(stlf_res.forecast(forecast_len).values, index = real_future.ds)
+                       ,'metrics': calculate_metrics(y_train['y'], train_preds)}
+    
+
+    #фит экспоненты
+
+    study = optuna.create_study()  
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(fit_exp_sm(y_train['y'], seasonal_preiod), n_trials=10) 
+
+    exp_model = ExponentialSmoothing(endog = y_train['y'], seasonal_periods = seasonal_preiod, **study.best_params).fit()
+
+    exp_pred = exp_model.forecast(forecast_len)
+
+    pred_stat['exp'] = { 'model': exp_model
+                        ,'train_pred': pd.Series(exp_model.fittedvalues.values, index=y_train.ds)
+                        ,'test_pred': pd.Series(exp_pred.values, index = real_future.ds)
+                        ,'metrics': calculate_metrics(y_train['y'], exp_model.fittedvalues)}
+
+
+    maes = {name: info['metrics']['MAE'] for name, info in pred_stat.items()}
+    inv_sum = sum(1.0 / v for v in maes.values())
+    weights = {k: (1.0 / v) / inv_sum for k, v in maes.items()}
+    
+    ensemble_train = sum(np.array(pred_stat[name]['train_pred']) * weights[name] for name in pred_stat)
+    ensemble_test = sum(np.array(pred_stat[name]['test_pred']) * weights[name] for name in pred_stat)
+
+    
+    pred_stat['Ensemble'] = {
+        'train_pred': pd.Series(ensemble_train, index=y_train.ds),
+        'test_pred': pd.Series(ensemble_test, index = real_future.ds),
+        'metrics': calculate_metrics(y_train['y'], ensemble_train),
+        'weights': weights
+    }
+
+    metrics_list = []
+    for model_name, data in pred_stat.items():
+        m = data['metrics'].copy()
+        m['Model'] = model_name
+        metrics_list.append(m)
+    
+    stat_df = pd.DataFrame(metrics_list).set_index('Model')
+
+    if test_size:
+        metrics_list = []
+        for model_name, data in pred_stat.items():
+            m = data['metrics'].copy()
+            m = {f'Train_{k}': v for k, v in m.items()} 
+            m['Model'] = model_name
+            
+            actual_test = y_test['y'].values
+            predicted_test = data['test_pred'][:len(actual_test)]
+            test_m = calculate_metrics(actual_test, predicted_test)
+            for k, v in test_m.items():
+                m[f'Test_{k}'] = v
+            
+            metrics_list.append(m)
+        
+        stat_df = pd.DataFrame(metrics_list).set_index('Model')
+        
+        column_order = sorted(stat_df.columns)
+        stat_df = stat_df[column_order]
+        
+        display(stat_df)
+
+    if graph:
+        plot_forecast_results(pred_stat, y_train, y_test, value_name)
+    
+    return pred_stat, stat_dfel.order 
 
     
 def fit_exp_sm(y, seasonal_periods):
