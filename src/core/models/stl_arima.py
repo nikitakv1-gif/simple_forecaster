@@ -13,6 +13,7 @@ class STLArimaModel:
         self.trend_params = trend_params
 
     def fit(self, y_train):
+
         if (self.arima_params is None or 
             self.trend_params is None):
             
@@ -24,11 +25,12 @@ class STLArimaModel:
                                                       self.trend_params)
             
 
-        self.model = STLForecast(y_train['y'], ARIMA, model_kwargs=dict(order=self.arima_params, trend=self.trend_params), period = self.seasonal_periods, robust=True).fit()
+        self.model = STLForecast(y_train['y'], ARIMA, model_kwargs=dict(order=self.arima_params, trend=self.trend_params, enforce_stationarity=False),
+                                  period = self.seasonal_periods, robust=True).fit()
     
         train_preds = self.model.get_prediction(start=y_train.index[0], end=y_train.index[-1]).predicted_mean
         self.is_fitted = True
-        self.fittedvalues = pd.Series(train_preds.values, index = y_train.ds)
+        self.fittedvalues = train_preds
         self.train_len = len(y_train[['y']])
         
         return self

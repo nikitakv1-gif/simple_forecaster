@@ -6,7 +6,8 @@ class ESModel:
 
     def __init__(self, seasonal_periods = None, 
                  trend = None, seasonal = None, 
-                 damped_trend = None):
+                 damped_trend = None,
+                 alpha = None, beta = None, gamma = None):
         
         self.is_fitted = False
         self.parameters = None
@@ -14,6 +15,9 @@ class ESModel:
         self.seasonal = seasonal
         self.damped_trend = damped_trend
         self.seasonal_periods = seasonal_periods
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
 
     def fit(self, y_train):
         if (self.parameters is None):
@@ -21,15 +25,19 @@ class ESModel:
             self.seasonal, 
             self.damped_trend, 
             self.seasonal_periods, 
-            self.ansamble_weight) = es_optimizer(y_train[['y']], 
+            self.ansamble_weight,
+            self.alpha,
+            self.beta,
+            self.gamma) = es_optimizer(y_train[['y']], 
                                                 trend = self.trend,
                                                 damped = self.damped_trend,
                                                 seasonal = self.seasonal, 
-                                                seasonal_periods = self.seasonal_periods)
+                                                seasonal_periods = self.seasonal_periods,
+                                                alpha = self.alpha, beta = self.beta, gamma = self.gamma)
 
-        self.model = ExponentialSmoothing(endog = y_train[['y']], 
+        self.model = ExponentialSmoothing(endog = y_train[['y']],
                                           trend = self.trend, damped_trend = self.damped_trend,
-                                          seasonal = self.seasonal, seasonal_periods = self.seasonal_periods).fit()
+                                          seasonal = self.seasonal, seasonal_periods = self.seasonal_periods).fit(smoothing_level=self.alpha, smoothing_trend=self.beta, smoothing_seasonal=self.gamma, optimized=False)
         
         self.is_fitted = True
 

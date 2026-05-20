@@ -8,7 +8,7 @@ from prophet import Prophet
 
 def stop_when_no_improvement(study, trial):
 
-    window = 5
+    window = 20
 
     if len(study.trials) < window:
         return
@@ -23,7 +23,7 @@ def stop_when_no_improvement(study, trial):
 def prophet_optimizer(y, 
                       seasonal_periods,
                       freq,
-                      n_trials=30):
+                      n_trials=200):
     
     """Временная фейк версия"""
     
@@ -47,7 +47,7 @@ def prophet_optimizer(y,
             print(e)
             return 1e10
 
-    study = optuna.create_study(direction='minimize')
+    study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=42))
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study.optimize(objective, n_trials=n_trials, callbacks=[stop_when_no_improvement])
 
